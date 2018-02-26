@@ -51,28 +51,17 @@ class MFFileMgmt(object):
         sets the simulation working path
     """
     def __init__(self, path):
-        self._python_path = os.getcwd()
         self._sim_path = ''
         self.set_sim_path(path)
 
         # keys:fully pathed filenames, vals:FilePath instances
         self.existing_file_dict = {}
         # keys:filenames,vals:instance name
-        self.distributed_file_dict = {}
 
         self.model_relative_path = collections.OrderedDict()
 
         self._last_loaded_sim_path = None
         self._last_loaded_model_relative_path = collections.OrderedDict()
-
-    @property
-    def python_path(self):
-        return self._python_path
-
-    def set_model_relative_path(self, model, path):
-        path = self.string_to_file_path(path)
-        self.model_relative_path[model] = path
-        self.set_last_accessed_path()
 
     def copy_files(self, copy_relative_only=True):
         num_files_copied = 0
@@ -123,6 +112,34 @@ class MFFileMgmt(object):
         current_abs_path = self.resolve_path('', model_name, False)
         return os.path.relpath(old_abs_path, current_abs_path)
 
+    def strip_model_relative_path(self, model_name, path):
+        if model_name in self.model_relative_path:
+            model_rel_path = self.model_relative_path[model_name]
+            new_path = None
+            while path:
+                path, leaf = os.path.split(path)
+                if leaf != model_rel_path:
+                    if new_path:
+                        new_path = os.path.join(leaf, new_path)
+                    else:
+                        new_path = leaf
+            return new_path
+
+    @staticmethod
+    def unique_file_name(file_name, lookup):
+        num = 0
+        while MFFileMgmt._build_file(file_name, num) in lookup:
+            num += 1
+        return MFFileMgmt._build_file(file_name, num)
+
+    @staticmethod
+    def _build_file(file_name, num):
+        file, ext = os.path.splitext(file_name)
+        if ext:
+            return '{}_{}{}'.format(file, num, ext)
+        else:
+            return '{}_{}'.format(file, num)
+
     @staticmethod
     def string_to_file_path(fp_string):
         file_delimitiers = ['/','\\']
@@ -130,18 +147,15 @@ class MFFileMgmt(object):
         for delimiter in file_delimitiers:
             arr_string = new_string.split(delimiter)
             if len(arr_string) > 1:
-                new_string = os.path.join(arr_string[0], arr_string[1])
+                if os.path.isabs(fp_string):
+                    new_string = '{}{}{}'.format(arr_string[0], delimiter,
+                                                 arr_string[1])
+                else:
+                    new_string = os.path.join(arr_string[0], arr_string[1])
                 if len(arr_string) > 2:
                     for path_piece in arr_string[2:]:
                         new_string = os.path.join(new_string, path_piece)
         return new_string
-
-    @staticmethod
-    def convert_to_absolute(self, path):
-        if path.isabs():
-            return path
-        else:
-            return os.path.join(os.getcwd(), path)
 
     def set_last_accessed_path(self):
         self._last_loaded_sim_path = self._sim_path
@@ -153,7 +167,10 @@ class MFFileMgmt(object):
             return os.path.join(self._last_loaded_sim_path,
                                 self._last_loaded_model_relative_path[key])
         else:
-            return os.path.join(self._sim_path, self.model_relative_path[key])
+            if key in self.model_relative_path:
+                return os.path.join(self._sim_path, self.model_relative_path[key])
+            else:
+                return self._sim_path
 
     def get_sim_path(self, last_loaded_path=False):
         if last_loaded_path:
@@ -275,7 +292,7 @@ class PackageContainer(object):
         package_utl_abbr = 'utl{}'.format(package_type)
         base_path, tail = os.path.split(os.path.realpath(__file__))
         package_path = os.path.join(base_path, 'modflow')
-
+        package_list = []
         # iterate through python files
         package_file_paths = glob.glob(os.path.join(package_path, "*.py"))
         for package_file_path in package_file_paths:
@@ -297,11 +314,17 @@ class PackageContainer(object):
                 if not value or not inspect.isclass(value) or not \
                   hasattr(value, 'package_abbr'):
                     continue
-                # check package type
-                if value.package_abbr == package_abbr or \
-                  value.package_abbr == package_utl_abbr:
-                    return value
-        return None
+                if package_type is None:
+                    package_list.append(value)
+                else:
+                    # check package type
+                    if value.package_abbr == package_abbr or \
+                      value.package_abbr == package_utl_abbr:
+                        return value
+        if package_type is None:
+            return package_list
+        else:
+            return None
 
     def _add_package(self, package, path):
         # put in packages list and update lookup dictionaries
@@ -312,6 +335,32 @@ class PackageContainer(object):
         if package.package_type not in self.package_type_dict:
             self.package_type_dict[package.package_type.lower()] = []
         self.package_type_dict[package.package_type.lower()].append(package)
+
+    def _remove_package(self, package):
+        self.packages.remove(package)
+        if package.package_name is not None and \
+                package.package_name.lower() in self.package_name_dict:
+            del self.package_name_dict[package.package_name.lower()]
+        del self.package_key_dict[package.path[-1].lower()]
+        package_list = self.package_type_dict[package.package_type.lower()]
+        package_list.remove(package)
+        if len(package_list) == 0:
+            del self.package_type_dict[package.package_type.lower()]
+
+        # collect keys of items to be removed from main dictionary
+        items_to_remove = []
+        for key, data in self.simulation_data.mfdata.items():
+            is_subkey = True
+            for pitem, ditem in zip(package.path, key):
+                if pitem != ditem:
+                    is_subkey = False
+                    break
+            if is_subkey:
+                items_to_remove.append(key)
+
+        # remove items from main dictionary
+        for key in items_to_remove:
+            del self.simulation_data.mfdata[key]
 
     def get_package(self, name=None):
         """
