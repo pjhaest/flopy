@@ -13,7 +13,7 @@ class ModflowGwfrcha(mfpackage.MFPackage):
     model : MFModel
         Model that this package is a part of.  Package is automatically
         added to model when it is initialized.
-    add_to_package_list : bool
+    loading_package : bool
         Do not set this parameter. It is intended for debugging and internal
         processing purposes only.
     readasarrays : boolean
@@ -69,7 +69,9 @@ class ModflowGwfrcha(mfpackage.MFPackage):
         * irch (integer) IRCH is the layer number that defines the layer in
           each vertical column where recharge is applied. If IRCH is omitted,
           recharge by default is applied to cells in layer 1. IRCH can only be
-          used if READASARRAYS is specified in the OPTIONS block.
+          used if READASARRAYS is specified in the OPTIONS block. If IRCH is
+          specified, it must be specified as the first variable in the PERIOD
+          block or MODFLOW will terminate with an error.
     recharge : [double]
         * recharge (double) is the recharge flux rate (:math:`LT^{-1}`). This
           rate is multiplied inside the program by the surface area of the cell
@@ -109,7 +111,7 @@ class ModflowGwfrcha(mfpackage.MFPackage):
     dfn_file_name = "gwf-rcha.dfn"
 
     dfn = [["block options", "name readasarrays", "type keyword", "shape", 
-            "reader urword", "optional false"],
+            "reader urword", "optional false", "default_value True"],
            ["block options", "name fixed_cell", "type keyword", "shape", 
             "reader urword", "optional true"],
            ["block options", "name auxiliary", "type string", 
@@ -149,18 +151,19 @@ class ModflowGwfrcha(mfpackage.MFPackage):
            ["block period", "name irch", "type integer", 
             "shape (ncol*nrow; ncpl)", "reader readarray", "optional true"],
            ["block period", "name recharge", "type double precision", 
-            "shape (ncol*nrow; ncpl)", "reader readarray"],
+            "shape (ncol*nrow; ncpl)", "reader readarray", 
+            "default_value 1.e-3"],
            ["block period", "name aux", "type double precision", 
             "shape (ncol*nrow; ncpl)", "reader readarray", "optional true"]]
 
-    def __init__(self, model, add_to_package_list=True, readasarrays=None,
+    def __init__(self, model, loading_package=False, readasarrays=True,
                  fixed_cell=None, auxiliary=None, auxmultname=None,
                  print_input=None, print_flows=None, save_flows=None,
                  tas_filerecord=None, obs_filerecord=None, irch=None,
-                 recharge=None, aux=None, fname=None, pname=None,
+                 recharge=1.e-3, aux=None, fname=None, pname=None,
                  parent_file=None):
         super(ModflowGwfrcha, self).__init__(model, "rcha", fname, pname,
-                                             add_to_package_list, parent_file)        
+                                             loading_package, parent_file)        
 
         # set up variables
         self.readasarrays = self.build_mfdata("readasarrays",  readasarrays)

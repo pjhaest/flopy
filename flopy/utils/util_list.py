@@ -13,6 +13,12 @@ import os
 import warnings
 import numpy as np
 
+try:
+    from numpy.lib import NumpyVersion
+    numpy114 = NumpyVersion(np.__version__) >= '1.14.0'
+except ImportError:
+    numpy114 = False
+
 
 class MfList(object):
     """
@@ -84,6 +90,9 @@ class MfList(object):
         if data is not None:
             self.__cast_data(data)
         self.__df = None
+        if list_free_format is None:
+            if package.parent.version == "mf2k":
+                list_free_format = False
         self.list_free_format = list_free_format
         return
 
@@ -210,9 +219,10 @@ class MfList(object):
             mxact = max(mxact, self.get_itmp(kper))
         return mxact
 
-    # Get the numpy savetxt-style fmt string that corresponds to the dtype
     @property
     def fmt_string(self):
+        """Returns a C-style fmt string for numpy savetxt that corresponds to
+        the dtype"""
         if self.list_free_format is not None:
             use_free = self.list_free_format
         else:
@@ -222,32 +232,40 @@ class MfList(object):
             # mt3d list data is fixed format
             if 'mt3d' in self.package.parent.version.lower():
                 use_free = False
-        fmt_string = ''
+        fmts = []
         for field in self.dtype.descr:
             vtype = field[1][1].lower()
-            if vtype == 'i':
+            if vtype == 'i' or vtype == 'b':
                 if use_free:
-                    fmt_string += ' %9d'
+                    fmts.append('%9d')
                 else:
-                    fmt_string += '%10d'
+                    fmts.append('%10d')
             elif vtype == 'f':
                 if use_free:
-                    fmt_string += ' %15.7E'
+                    if numpy114:
+                        # Use numpy's floating-point formatter (Dragon4)
+                        fmts.append('%15s')
+                    else:
+                        fmts.append('%15.7E')
                 else:
-                    fmt_string += '%10G'
-
+                    fmts.append('%10G')
             elif vtype == 'o':
                 if use_free:
-                    fmt_string += ' %9s'
+                    fmts.append('%9s')
                 else:
-                    fmt_string += '%10s'
+                    fmts.append('%10s')
             elif vtype == 's':
-                raise Exception("MfList error: '\str\' type found it dtype." + \
-                                " This gives unpredictable results when " + \
-                                "recarray to file - change to \'object\' type")
+                raise TypeError(
+                        "MfList.fmt_string error: 'str' type found in dtype. "
+                        "This gives unpredictable results when "
+                        "recarray to file - change to 'object' type")
             else:
-                raise Exception("MfList.fmt_string error: unknown vtype " + \
-                                "in dtype:" + vtype)
+                raise TypeError("MfList.fmt_string error: unknown vtype in "
+                                "field: {}".format(field))
+        if use_free:
+            fmt_string = ' ' + ' '.join(fmts)
+        else:
+            fmt_string = ''.join(fmts)
         return fmt_string
 
     # Private method to cast the data argument
@@ -283,6 +301,10 @@ class MfList(object):
                     except Exception as e:
                         raise Exception("MfList error: casting list " + \
                                         "to ndarray: " + str(e))
+
+                #super hack - sick of recarrays already
+                #if (isinstance(d,np.ndarray) and len(d.dtype.fields) > 1):
+                #    d = d.view(np.recarray)
 
                 if isinstance(d, np.recarray):
                     self.__cast_recarray(kper, d)
@@ -388,35 +410,48 @@ class MfList(object):
             return None
 
         # make a dataframe of all data for all stress periods
+        names = ['k', 'i', 'j']
+        if 'MNW2' in self.package.name:
+            names += ['wellid']
+
+        # find relevant variable names
+        # may have to iterate over the first stress period
+        for per in range(self.model.nper):
+            if hasattr(self.data[per], 'dtype'):
+                varnames = list([n for n in self.data[per].dtype.names
+                                 if n not in names])
+                break
+
+        # create list of dataframes for each stress period
+        # each with index of k, i, j
         dfs = []
-        for k, v in self.data.items():
-            df = pd.DataFrame(v)
-            df['per'] = k
-            df['id'] = df.index
-            dfs.append(df)
-        df = pd.concat(dfs)
-        df['node'] = df.i * self.model.ncol + df.j
-        kij = df[['id', 'node', 'k', 'i', 'j']].copy()
-        kij.index = kij.id
-        kij = kij.groupby(kij.index).mean()  # remove duplicates
-
-        # pivot the dataframe so that stress periods
-        # are represented across columns
-        # nrow == ncells, ncol = nvariables x nper
-        columns = list(set(df.columns).difference({'k', 'i', 'j', 'per', 'node', 'id'}))
-        dfs = [kij]
-        for c in columns:
-            pv = df[['per', c, 'id']].pivot(index='id', columns='per', values=c)
-
-            if squeeze:
-                diff = pv.diff(axis=1)
-                diff[0] = 1
-                diff = diff.astype(int)
-                changed = diff.sum(axis=0) > 0
-                pv = pv.loc[:, changed]
-            pv.columns = ['{}{}'.format(c, p) for p in pv.columns]
-            dfs.append(pv)
-        return pd.concat(dfs, axis=1)
+        for per in range(self.model.nper):
+            recs = self.data[per]
+            if recs is None or recs is 0:
+                # add an empty dataframe if a stress period is
+                # set to 0 (e.g. no pumping during a predevelopment
+                # period)
+                columns = names + list(['{}{}'.format(c, per) for c in varnames])
+                dfi = pd.DataFrame(data=None, columns=columns)
+                dfi = dfi.set_index(names)
+            else:
+                dfi = pd.DataFrame.from_records(recs)
+                dfi = dfi.set_index(names)
+                dfi.columns = list(['{}{}'.format(c, per) for c in varnames])
+            dfs.append(dfi)
+        df = pd.concat(dfs, axis=1)
+        if squeeze:
+            keep = []
+            for var in varnames:
+                diffcols = list([n for n in df.columns if var in n])
+                diff = df[diffcols].diff(axis=1)
+                diff['{}0'.format(var)] = 1  # always return the first stress period
+                changed = diff.sum(axis=0) != 0
+                keep.append(df.loc[:, changed.index[changed]])
+            df = pd.concat(keep, axis=1)
+        df = df.reset_index()
+        df.insert(len(names), 'node', df.i * self.model.ncol + df.j)
+        return df
 
     def add_record(self, kper, index, values):
         # Add a record to possible already set list for a given kper
@@ -595,7 +630,7 @@ class MfList(object):
                 kper_vtype = int
 
             f.write(" {0:9d} {1:9d} # stress period {2:d}\n"
-                    .format(itmp, 0, kper))
+                    .format(itmp, 0, kper+1))
 
             isExternal = False
             if self.model.array_free_format and \
@@ -1008,6 +1043,7 @@ class MfList(object):
         for name, arr in arrays.items():
             cnt = np.zeros((self.model.nlay, self.model.nrow, self.model.ncol),
                            dtype=np.float)
+            #print(name,kper)
             for rec in sarr:
                 arr[rec['k'], rec['i'], rec['j']] += rec[name]
                 cnt[rec['k'], rec['i'], rec['j']] += 1.

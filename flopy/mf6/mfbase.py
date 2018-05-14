@@ -1,9 +1,158 @@
 import glob
 import importlib
-import inspect
+import inspect, sys, traceback
 import os, collections, copy
 from shutil import copyfile
 from enum import Enum
+
+
+# internal handled exceptions
+class MFInvalidTransientBlockHeaderException(Exception):
+    """
+    Exception related to parsing a transient block header
+    """
+
+    def __init__(self, error):
+        Exception.__init__(self,
+                           "MFInvalidTransientBlockHeaderException: {}".format(
+                               error))
+
+
+class ReadAsArraysException(Exception):
+    """
+    Attempted to load ReadAsArrays package as non-ReadAsArraysPackage
+    """
+
+    def __init__(self, error):
+        Exception.__init__(self, "ReadAsArraysException: {}".format(error))
+
+
+# external exceptions for users
+class FlopyException(Exception):
+    """
+    General Flopy Exception
+    """
+
+    def __init__(self, error, location=''):
+        self.message = error
+        Exception.__init__(self,
+                           "FlopyException: {} ({})".format(error, location))
+
+
+class StructException(Exception):
+    """
+    Exception related to the package file structure
+    """
+
+    def __init__(self, error, location):
+        self.message = error
+        Exception.__init__(self,
+                           "StructException: {} ({})".format(error, location))
+
+
+class MFDataException(Exception):
+    """
+    Exception related to MODFLOW input/output data
+    """
+    def __init__(self, model=None, package=None, path=None,
+                 current_process=None, data_element=None,
+                 method_caught_in=None, org_type=None, org_value=None,
+                 org_traceback=None, message=None, debug=None,
+                 mfdata_except=None):
+        if mfdata_except is not None and \
+                isinstance(mfdata_except, MFDataException):
+            # copy constructor - copying values from original exception
+            self.model = mfdata_except.model
+            self.package = mfdata_except.package
+            self.current_process = mfdata_except.current_process
+            self.data_element = mfdata_except.data_element
+            self.path = mfdata_except.path
+            self.messages = mfdata_except.messages
+            self.debug = mfdata_except.debug
+            self.method_caught_in = mfdata_except.method_caught_in
+            self.org_type = mfdata_except.org_type
+            self.org_value = mfdata_except.org_value
+            self.org_traceback = mfdata_except.org_traceback
+            self.org_tb_string = mfdata_except.org_tb_string
+        else:
+            self.messages = []
+            if mfdata_except is not None and \
+                    (isinstance(mfdata_except, StructException) or
+                    isinstance(mfdata_except, FlopyException)):
+                self.messages.append(mfdata_except.message)
+            self.model = None
+            self.package = None
+            self.current_process = None
+            self.data_element = None
+            self.path = None
+            self.debug = False
+            self.method_caught_in = None
+            self.org_type = None
+            self.org_value = None
+            self.org_traceback = None
+            self.org_tb_string = None
+        # override/assign any values that are not none
+        if model is not None:
+            self.model = model
+        if package is not None:
+            self.package = package
+        if current_process is not None:
+            self.current_process = current_process
+        if data_element is not None:
+            self.data_element = data_element
+        if path is not None:
+            self.path = path
+        if message is not None:
+            self.messages.append(message)
+        if debug is not None:
+            self.debug = debug
+        if method_caught_in is not None:
+            self.method_caught_in = method_caught_in
+        if org_type is not None:
+            self.org_type = org_type
+        if org_value is not None:
+            self.org_value = org_value
+        if org_traceback is not None:
+            self.org_traceback = org_traceback
+        self.org_tb_string = traceback.format_exception(self.org_type,
+                                                        self.org_value,
+                                                        self.org_traceback)
+        # build error string
+        error_message_0 = 'An error occurred in '
+        if self.data_element is not None and self.data_element != '':
+            error_message_1 = 'data element "{}"' \
+                              ' '.format(self.data_element)
+        else:
+            error_message_1 = ''
+        if self.model is not None and self.model != '':
+            error_message_2 = 'model "{}" '.format(self.model)
+        else:
+            error_message_2 = ''
+        error_message_3 = 'package "{}".'.format(self.package)
+        error_message_4 = ' The error occurred while {} in the "{}" method' \
+                          '.'.format(self.current_process,
+                                     self.method_caught_in)
+        if len(self.messages) > 0:
+            error_message_5 = '\nAdditional Information:\n'
+            for index, message in enumerate(self.messages):
+                error_message_5 = '{}({}) {}\n'.format(error_message_5,
+                                                       index + 1, message)
+        else:
+            error_message_5 = ''
+        error_message = '{}{}{}{}{}{}'.format(error_message_0, error_message_1,
+                                              error_message_2, error_message_3,
+                                              error_message_4, error_message_5)
+        #if self.debug:
+        #    tb_string = ''.join(self.org_tb_string)
+        #    error_message = '{}\nCall Stack\n{}'.format(error_message,
+        #                                                tb_string)
+        Exception.__init__(self, error_message)
+
+
+class VerbosityLevel(Enum):
+    quiet = 1
+    normal = 2
+    verbose = 3
 
 
 class PackageContainerType(Enum):
@@ -51,42 +200,56 @@ class MFFileMgmt(object):
         sets the simulation working path
     """
     def __init__(self, path):
-        self._python_path = os.getcwd()
         self._sim_path = ''
         self.set_sim_path(path)
 
         # keys:fully pathed filenames, vals:FilePath instances
         self.existing_file_dict = {}
         # keys:filenames,vals:instance name
-        self.distributed_file_dict = {}
 
         self.model_relative_path = collections.OrderedDict()
 
         self._last_loaded_sim_path = None
         self._last_loaded_model_relative_path = collections.OrderedDict()
 
-    @property
-    def python_path(self):
-        return self._python_path
-
     def copy_files(self, copy_relative_only=True):
         num_files_copied = 0
         if self._last_loaded_sim_path is not None:
             for key, mffile_path in self.existing_file_dict.items():
-                for model_name in mffile_path.model_name:
-                    if model_name in self._last_loaded_model_relative_path:
-                        if os.path.isfile(self.resolve_path(mffile_path,
-                                                            model_name,
-                                                            True)) and \
-                          (not mffile_path.isabs() or not copy_relative_only):
-                            if not os.path.exists(
-                              self.resolve_path(mffile_path, model_name)):
-                                copyfile(self.resolve_path(mffile_path,
-                                                           model_name, True),
-                                         self.resolve_path(mffile_path,
-                                                           model_name))
-                                num_files_copied += 1
-        print('INFORMATION: {} external files copied'.format(num_files_copied))
+#                for model_name in mffile_path.model_name:
+#                    if model_name in self._last_loaded_model_relative_path:
+                # resolve previous simulation path.  if mf6 changes
+                # so that paths are relative to the model folder, then
+                # this call should have "model_name" instead of "None"
+                path_old = self.resolve_path(mffile_path, None,
+                                             True)
+                if os.path.isfile(path_old) and \
+                  (not mffile_path.isabs() or not copy_relative_only):
+                    # change "None" to "model_name" as above if mf6
+                    # supports model relative paths
+                    path_new = self.resolve_path(mffile_path,
+                                                 None)
+                    if not os.path.exists(path_new):
+                        new_folders, new_leaf = os.path.split(path_new)
+                        if not os.path.exists(new_folders):
+                            os.makedirs(new_folders)
+                        try:
+                            copyfile(path_old,
+                                     path_new)
+                        except:
+                            type_, value_, traceback_ = sys.exc_info()
+                            raise MFDataException(self.structure.get_model(),
+                                                  self.structure.get_package(),
+                                                  self._path,
+                                                  'appending data',
+                                                  self.structure.name,
+                                                  inspect.stack()[0][3], type_,
+                                                  value_,
+                                                  traceback_, None,
+                                                  self._simulation_data.debug)
+
+                        num_files_copied += 1
+        return num_files_copied
 
     def get_updated_path(self, external_file_path, model_name,
                          ext_file_action):
@@ -148,26 +311,26 @@ class MFFileMgmt(object):
 
     @staticmethod
     def string_to_file_path(fp_string):
-        file_delimitiers = ['/','\\']
+        file_delimiters = ['/','\\']
         new_string = fp_string
-        for delimiter in file_delimitiers:
+        for delimiter in file_delimiters:
             arr_string = new_string.split(delimiter)
             if len(arr_string) > 1:
-                new_string = os.path.join(arr_string[0], arr_string[1])
+                if os.path.isabs(fp_string):
+                    new_string = '{}{}{}'.format(arr_string[0], delimiter,
+                                                 arr_string[1])
+                else:
+                    new_string = os.path.join(arr_string[0], arr_string[1])
                 if len(arr_string) > 2:
                     for path_piece in arr_string[2:]:
                         new_string = os.path.join(new_string, path_piece)
         return new_string
 
-    @staticmethod
-    def convert_to_absolute(self, path):
-        if path.isabs():
-            return path
-        else:
-            return os.path.join(os.getcwd(), path)
-
     def set_last_accessed_path(self):
         self._last_loaded_sim_path = self._sim_path
+        self.set_last_accessed_model_path()
+
+    def set_last_accessed_model_path(self):
         for key, item in self.model_relative_path.items():
             self._last_loaded_model_relative_path[key] = copy.deepcopy(item)
 
@@ -299,41 +462,70 @@ class PackageContainer(object):
     def package_factory(package_type, model_type):
         package_abbr = '{}{}'.format(model_type, package_type)
         package_utl_abbr = 'utl{}'.format(package_type)
-        base_path, tail = os.path.split(os.path.realpath(__file__))
-        package_path = os.path.join(base_path, 'modflow')
         package_list = []
         # iterate through python files
-        package_file_paths = glob.glob(os.path.join(package_path, "*.py"))
+        package_file_paths = PackageContainer.get_package_file_paths()
         for package_file_path in package_file_paths:
-            package_file_name = os.path.basename(package_file_path)
-            module_path = os.path.splitext(package_file_name)[0]
-            module_name = '{}{}{}'.format('Modflow', module_path[2].upper(),
-                                          module_path[3:])
-            if module_name.startswith("__"):
-                continue
-
-            # import
-            module = importlib.import_module("flopy.mf6.modflow.{}".format(
-              module_path))
-
-            # iterate imported items
-            for item in dir(module):
-                value = getattr(module, item)
-                # verify this is a class
-                if not value or not inspect.isclass(value) or not \
-                  hasattr(value, 'package_abbr'):
-                    continue
-                if package_type is None:
-                    package_list.append(value)
-                else:
-                    # check package type
-                    if value.package_abbr == package_abbr or \
-                      value.package_abbr == package_utl_abbr:
-                        return value
+            module = PackageContainer.get_module(package_file_path)
+            if module is not None:
+                # iterate imported items
+                for item in dir(module):
+                    value = PackageContainer.get_module_val(module, item,
+                                                            'package_abbr')
+                    if value is not None:
+                        if package_type is None:
+                            package_list.append(value)
+                        else:
+                            # check package type
+                            if value.package_abbr == package_abbr or \
+                              value.package_abbr == package_utl_abbr:
+                                return value
         if package_type is None:
             return package_list
         else:
             return None
+
+    @staticmethod
+    def model_factory(model_type):
+        package_file_paths = PackageContainer.get_package_file_paths()
+        for package_file_path in package_file_paths:
+            module = PackageContainer.get_module(package_file_path)
+            if module is not None:
+                # iterate imported items
+                for item in dir(module):
+                    value = PackageContainer.get_module_val(module, item,
+                                                            'model_type')
+                    if value is not None and value.model_type == model_type:
+                        return value
+        return None
+
+    @staticmethod
+    def get_module_val(module, item, attrb):
+        value = getattr(module, item)
+        # verify this is a class
+        if not value or not inspect.isclass(value) or not \
+                hasattr(value, attrb):
+            return None
+        return value
+
+    @staticmethod
+    def get_module(package_file_path):
+        package_file_name = os.path.basename(package_file_path)
+        module_path = os.path.splitext(package_file_name)[0]
+        module_name = '{}{}{}'.format('Modflow', module_path[2].upper(),
+                                      module_path[3:])
+        if module_name.startswith("__"):
+            return None
+
+        # import
+        return importlib.import_module("flopy.mf6.modflow.{}".format(
+            module_path))
+
+    @staticmethod
+    def get_package_file_paths():
+        base_path, tail = os.path.split(os.path.realpath(__file__))
+        package_path = os.path.join(base_path, 'modflow')
+        return glob.glob(os.path.join(package_path, "*.py"))
 
     def _add_package(self, package, path):
         # put in packages list and update lookup dictionaries
@@ -344,6 +536,32 @@ class PackageContainer(object):
         if package.package_type not in self.package_type_dict:
             self.package_type_dict[package.package_type.lower()] = []
         self.package_type_dict[package.package_type.lower()].append(package)
+
+    def _remove_package(self, package):
+        self.packages.remove(package)
+        if package.package_name is not None and \
+                package.package_name.lower() in self.package_name_dict:
+            del self.package_name_dict[package.package_name.lower()]
+        del self.package_key_dict[package.path[-1].lower()]
+        package_list = self.package_type_dict[package.package_type.lower()]
+        package_list.remove(package)
+        if len(package_list) == 0:
+            del self.package_type_dict[package.package_type.lower()]
+
+        # collect keys of items to be removed from main dictionary
+        items_to_remove = []
+        for key, data in self.simulation_data.mfdata.items():
+            is_subkey = True
+            for pitem, ditem in zip(package.path, key):
+                if pitem != ditem:
+                    is_subkey = False
+                    break
+            if is_subkey:
+                items_to_remove.append(key)
+
+        # remove items from main dictionary
+        for key in items_to_remove:
+            del self.simulation_data.mfdata[key]
 
     def get_package(self, name=None):
         """
@@ -381,12 +599,13 @@ class PackageContainer(object):
 
         # search for partial package name
         for pp in self.packages:
-            # get first package of the type requested
-            package_name = pp.package_name.lower()
-            if len(package_name) > len(name):
-                package_name = package_name[0:len(name)]
-            if package_name.lower() == name.lower():
-                return pp
+            if pp.package_name is not None:
+                # get first package of the type requested
+                package_name = pp.package_name.lower()
+                if len(package_name) > len(name):
+                    package_name = package_name[0:len(name)]
+                if package_name.lower() == name.lower():
+                    return pp
 
         return None
 

@@ -8,6 +8,7 @@ from .mfdis import get_layer
 from ..utils import check
 from ..utils.flopy_io import line_parse, pop_item
 from ..utils import MfList
+from ..utils.recarray_utils import create_empty_recarray
 
 from ..pakbase import Package
 
@@ -175,8 +176,8 @@ class Mnw(object):
             zpump : float
             hlim : float
             qcut : int
-            gfrcmn : float
-            gfrcmx : float
+            qfrcmn : float
+            qfrcmx : float
             hlift : float
             liftq0 : float
             liftqmax : float
@@ -384,9 +385,7 @@ class Mnw(object):
         dtype = Mnw.get_default_spd_dtype(structured=structured)
         if aux_names is not None:
             dtype = Package.add_to_dtype(dtype, aux_names, np.float32)
-        d = np.zeros(nper, dtype=dtype)
-        d = d.view(np.recarray)
-        return d
+        return create_empty_recarray(nper, dtype)
 
     @staticmethod
     def get_default_spd_dtype(structured=True):
@@ -895,9 +894,7 @@ class ModflowMnw2(Package):
         dtype = ModflowMnw2.get_default_node_dtype(structured=structured)
         if aux_names is not None:
             dtype = Package.add_to_dtype(dtype, aux_names, np.float32)
-        d = np.zeros(maxnodes, dtype=dtype)
-        d = d.view(np.recarray)
-        return d
+        return create_empty_recarray(maxnodes, dtype)
 
     @staticmethod
     def get_default_node_dtype(structured=True):
@@ -945,12 +942,7 @@ class ModflowMnw2(Package):
         dtype = ModflowMnw2.get_default_spd_dtype(structured=structured)
         if aux_names is not None:
             dtype = Package.add_to_dtype(dtype, aux_names, np.float32)
-        d = np.zeros(itmp, dtype=dtype)
-        # if len(d) > 0:
-        #    d[:] = default_value
-        # d = np.core.records.fromarrays(d.transpose(), dtype=dtype)
-        d = d.view(np.recarray)
-        return d
+        return create_empty_recarray(itmp, dtype)
 
     @staticmethod
     def get_default_spd_dtype(structured=True):
@@ -1019,8 +1011,6 @@ class ModflowMnw2(Package):
                     wellid, qdes, capmult, cprime, xyz = _parse_4a(next(f),
                                                                    mnw,
                                                                    gwt=gwt)
-                    if wellid == 'Mellen3':
-                        j = 2
                     hlim, qcut, qfrcmn, qfrcmx = 0, 0, 0, 0
                     if mnw[wellid].qlimit < 0:
                         hlim, qcut, qfrcmn, qfrcmx = _parse_4b(next(f))
@@ -1124,8 +1114,6 @@ class ModflowMnw2(Package):
         nd = []
         for i in range(len(self.node_data)):
             r = self.node_data[i]
-            if r['wellid'] == '76264':
-                z=2
             if r['ztop'] - r['zbotm'] > 0:
                 startK = get_layer(self.parent.dis, r['i'], r['j'], r['ztop'])
                 endK = get_layer(self.parent.dis, r['i'], r['j'], r['zbotm'])
@@ -1401,7 +1389,7 @@ def _parse_2(f):
         d2dw.update(_parse_2c(next(f), losstype))  # dict of values for well
         for k, v in d2dw.items():
             if v > 0:
-                d2d[k] = v
+                d2d[k].append(v)
     # dataset 2d
     pp = 1  # partial penetration flag
     for i in range(np.abs(nnodes)):
@@ -1421,9 +1409,9 @@ def _parse_2(f):
                          cwc=d2dw['cwc'])
         # append only the returned items
         for k, v in d2di.items():
-            d2d[k] += v
-        if ppflag > 0:
-            d2d['pp'] += pop_item(line, float)
+            d2d[k].append(v)
+        if ppflag > 0 and nnodes > 0:
+            d2d['pp'].append(pop_item(line, float))
 
     # dataset 2e
     pumplay = None

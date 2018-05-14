@@ -22,31 +22,15 @@ import numpy as np
 from flopy import utils
 from .version import __version__
 
+if sys.version_info >= (3, 3):
+    from shutil import which
+else:
+    from distutils.spawn import find_executable as which
+
 # Global variables
 iconst = 1  # Multiplier for individual array elements in integer and real arrays read by MODFLOW's U2DREL, U1DREL and U2DINT.
 iprn = -1  # Printout flag. If >= 0 then array values read are printed in listing file.
 
-
-def is_exe(fpath):
-    return os.path.isfile(fpath) and os.access(fpath, os.X_OK)
-
-
-def which(program):
-    fpath, fname = os.path.split(program)
-    if fpath:
-        if is_exe(program):
-            return program
-    else:
-        # test for exe in current working directory
-        if is_exe(program):
-            return program
-        # test for exe in path statement
-        for path in os.environ["PATH"].split(os.pathsep):
-            path = path.strip('"')
-            exe_file = os.path.join(path, program)
-            if is_exe(exe_file):
-                return exe_file
-    return None
 
 
 class FileData(object):
@@ -136,6 +120,7 @@ class BaseModel(object):
         # external option stuff
         self.array_free_format = True
         self.free_format_input = True
+        self.parameter_load = False
         self.array_format = None
         self.external_fnames = []
         self.external_units = []
@@ -995,6 +980,14 @@ class BaseModel(object):
             self.check(f='{}.chk'.format(self.name), verbose=self.verbose,
                        level=1)
 
+        # reset the model to free_format if parameter substitution was
+        # performed on a model load
+        if self.parameter_load and not self.free_format_input:
+            if self.verbose:
+                print('\nReseting free_format_input to True to ' +
+                      'preserve the precision of the parameter data.')
+            self.free_format_input = True
+
         if self.verbose:
             print('\nWriting packages:')
 
@@ -1109,13 +1102,14 @@ class BaseModel(object):
         >>> m.check()
         """
 
-        results = {}
-        for p in self.packagelist:
-            results[p.name[0]] = p.check(f=None, verbose=False,
-                                         level=level - 1)
-
         # check instance for model-level check
         chk = utils.check(self, f=f, verbose=verbose, level=level)
+        results = {}
+
+        for p in self.packagelist:
+            if chk.package_check_levels.get(p.name[0].lower(), 0) <= level:
+                results[p.name[0]] = p.check(f=None, verbose=False,
+                                             level=level - 1)
 
         # model level checks
         # solver check
@@ -1320,7 +1314,9 @@ def run_model(exe_name, namefile, model_ws='./',
         Executable name (with path, if necessary) to run.
     namefile : str
         Namefile of model to run. The namefile must be the
-        filename of the namefile without the path.
+        filename of the namefile without the path. Namefile can be None
+        to allow programs that do not require a control file (name file)
+        to be passed as a command line argument.
     model_ws : str
         Path to the location of the namefile. (default is the
         current working directory - './')
@@ -1371,13 +1367,15 @@ def run_model(exe_name, namefile, model_ws='./',
         raise Exception(s)
     else:
         if not silent:
-            s = 'FloPy is using the following executable to run the model: {}'.format(
-                exe)
+            s = 'FloPy is using the following ' + \
+                ' executable to run the model: {}'.format(exe)
             print(s)
 
-    if not os.path.isfile(os.path.join(model_ws, namefile)):
-        s = 'The namefile for this model does not exists: {}'.format(namefile)
-        raise Exception(s)
+    if namefile is not None:
+        if not os.path.isfile(os.path.join(model_ws, namefile)):
+            s = 'The namefile for this model ' + \
+                'does not exists: {}'.format(namefile)
+            raise Exception(s)
 
     # simple little function for the thread to target
     def q_output(output, q):
@@ -1387,7 +1385,9 @@ def run_model(exe_name, namefile, model_ws='./',
             # output.close()
 
     # create a list of arguments to pass to Popen
-    argv = [exe_name, namefile]
+    argv = [exe_name]
+    if namefile is not None:
+        argv.append(namefile)
 
     # add additional arguments to Popen arguments
     if cargs is not None:
